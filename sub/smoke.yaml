@@ -1,7 +1,0 @@
-proxies:
-  - name: smoke2
-    type: ss
-    server: 127.0.0.1
-    port: 2
-    cipher: aes-256-gcm
-    password: x
