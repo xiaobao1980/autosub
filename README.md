@@ -17,7 +17,7 @@ https://fastly.jsdelivr.net/gh/xiaobao1980/autosub@sub/autosub.yaml
 
 **做**：抓 4 个还在更新的公开源 → 解 base64/明文/clash yaml 三种格式 → 按 server:port:uuid 去重 →
 协议白名单 → 修 mihomo 会整份拒绝的非法 REALITY 字段 → 按「同一节点出现在几个独立源里」降序取 300 个
-→ 拼上 dns / sniffer / 5 个策略分组 / 分流规则 → 每 6 小时提交一次。
+→ 拼上 dns / sniffer / rule-providers / 6 个策略分组 / 分流规则 → 每 6 小时提交一次。
 
 **不做**：**不测速**。这一步在 GitHub 上做不了——runner 在美国机房，而 GFW 的阻断是方向性的，
 它连得通的节点你家宽可能根本连不上，反过来也一样。所以这份订阅里 300 个节点是「多个独立采集仓
@@ -41,12 +41,18 @@ https://fastly.jsdelivr.net/gh/xiaobao1980/autosub@sub/autosub.yaml
 **免费节点的真实命中率**：原始池里约九成彻底连不上。经过多源共现筛选的 300 个会好一些，但仍然
 要在 `♻️ 自动选择` 里靠 url-test 自己捞出来，不要指望列表里每个都能用。
 
-**这是完整配置，不只是节点表**：含 `dns`（fake-ip）、`sniffer`、5 个分组、10 条分流规则、
+**这是完整配置，不只是节点表**：含 `dns`（fake-ip）、`sniffer`、6 个分组、13 条分流规则、
 `allow-lan: true`。OpenClash / mihomo 加载时这些字段会被你自己的覆写设置接管；但 clash-verge、
 v2rayN 这类独立客户端直接导入会照单采纳，导入前看一眼。
 
-**分组与规则**：`🚀 节点选择` / `♻️ 自动选择` / `🚑 故障转移` / `🎯 全局直连` / `🐟 漏网之鱼`，
+**分组与规则**：`🚀 节点选择` / `♻️ 自动选择` / `🚑 故障转移` / `🤖 AI 专用` / `🎯 全局直连` / `🐟 漏网之鱼`，
 末条规则 `MATCH,🐟 漏网之鱼`，未命中默认走代理。要分流自己加规则。
+`🤖 AI 专用` 的成员只有分组引用（没有把 300 个节点名再抄一遍），用途是「哪天发现某个节点能过
+ChatGPT，就手动钉在这里」，不影响其他流量。
+另有两条 `rule-providers`（Telegram、OpenAI），运行时由内核自己从 jsDelivr 拉，不占订阅文件体积；
+留它们是因为 `GEOSITE` 只按域名匹配，而这两家的规则集里带 IP 段。规则集拉不到不会让配置加载失败
+（实测内核只打一句 error 继续跑），每轮发布前 workflow 会额外确认这两个文件还在。
+不想要外部依赖就在 `sources.yaml` 里把 `output.rule_providers` 填 `false`，规则退回纯 GEOSITE/GEOIP。
 
 **新鲜度**：每 6 小时一次（`0 */6 * * *`）。本轮候选数、发布数、协议分布看 `sub/latest.json`；
 本轮跑了什么、为什么没更新，看仓库 Actions 页的运行记录。

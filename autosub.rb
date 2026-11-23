@@ -39,7 +39,9 @@ OUT_DEFAULTS = {
   'path' => 'autosub.yaml', 'stats' => 'stats.csv',
   'alive_list' => 'previous_alive.txt', 'manifest' => 'latest.json', 'min_alive' => 5,
   # 不测速时的输出上限，0 为不限。见 main 里的截断逻辑。
-  'max_nodes' => 0
+  'max_nodes' => 0,
+  # 关掉就不发 rule-providers 和 🤖 AI 专用 组，规则退回纯 GEOSITE/GEOIP（离线也能用）。
+  'rule_providers' => true
 }.freeze
 PUSH_DEFAULTS = {
   'method' => 'api', 'repo' => '', 'branch' => 'main',
@@ -777,11 +779,46 @@ RULES = [
   'GEOSITE,google,🚀 节点选择',
   'GEOSITE,telegram,🚀 节点选择',
   'GEOSITE,netflix,🚀 节点选择',
+  # apple 这个分类实测在 meta-rules-dat 的 GeoSite 里就有（GEOSITE,apple 直接可用），
+  # 加它是因为 GEOSITE,CN 管不到 apple.com：更新、iCloud、推送这些走免费节点纯属浪费。
+  'GEOSITE,apple,🎯 全局直连',
   'GEOSITE,bilibili,🎯 全局直连',
   'GEOSITE,CN,🎯 全局直连',
   'GEOIP,CN,🎯 全局直连',
   'MATCH,🐟 漏网之鱼'
 ].freeze
+
+# 规则集不抄进订阅文件，运行时让内核自己从 jsDelivr 拉。为什么只留两条：
+# 一是 meta-rules-dat 的 GeoSite 里 openai/apple/telegram/netflix/disney/google 这些分类全都有
+# （实测 mihomo -t 逐个 Load GeoSite rule 成功），GEOSITE 零额外下载就够用了，
+# provider 只有在「GeoSite 给不了」的地方才值得存在；
+# 二是 blackmatrix7 的 Telegram/OpenAI 里带 IP-CIDR 和 IP-CIDR6 条目，而 GEOSITE 只按域名匹配，
+# 直连 Telegram 服务器 IP、以及 ChatGPT 那几条 IP 段的流量它管不到——这才是这两条的增量。
+# behavior 必须写 classical：这些文件里混了 DOMAIN-SUFFIX/IP-CIDR/PROCESS，
+# 写成 domain 会让带 IP 的条目整条失效，而且不报错，是最难查的那种坏。
+# 广告规则集不开：Advertising_Domain.yaml 实测 7.9 MB，路由器每 24h 拉一次不现实。
+RULE_PROVIDERS = [
+  ['telegram', 'Telegram', '🚀 节点选择'],
+  ['openai', 'OpenAI', '🤖 AI 专用'],
+].freeze
+RP_BASE = 'https://fastly.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash'.freeze
+
+def rule_provider_lines
+  out = ['rule-providers:']
+  RULE_PROVIDERS.each do |key, name, _tgt|
+    out << "  #{key}:"
+    out << '    type: http'
+    out << '    format: yaml'
+    out << '    behavior: classical'
+    out << "    url: \"#{RP_BASE}/#{name}/#{name}.yaml\""
+    out << "    path: ./ruleset/#{key}.yaml"
+    out << '    interval: 86400'
+    # lazy：启动时不下载，第一次被规则命中才拉。开机少两个请求，
+    # 代价是第一条命中 Telegram/OpenAI 的连接多等一次下载。
+    out << '    lazy: true'
+  end
+  out
+end
 
 def proxy_block(p, st, carried = false)
   clean = p.reject { |k, _| k.to_s.start_with?('__') }
@@ -797,7 +834,7 @@ def proxy_block(p, st, carried = false)
   ["  # #{meta}", "  - #{y.first}"] + y[1..-1].to_a.map { |l| "    #{l}" }
 end
 
-def build_yaml(list, stats, note, carry = nil)
+def build_yaml(list, stats, note, carry = nil, rp = true)
   s = ['# 自动订阅流水线生成，请勿手工编辑', "# #{note}",
        'mixed-port: 7890', 'allow-lan: true', 'ipv6: false', 'mode: rule',
        'log-level: info', 'unified-delay: true', 'tcp-concurrent: true',
@@ -823,8 +860,9 @@ def build_yaml(list, stats, note, carry = nil)
        '    HTTP:', '      ports: [80, 8080-8888]',
        '    TLS:', '      ports: [443, 8443]',
        '    QUIC:', '      ports: [443, 8443]',
-       '  force-domain:', '    - "+.google.com"', '    - "+.netflix.com"',
-       'proxies:']
+       '  force-domain:', '    - "+.google.com"', '    - "+.netflix.com"']
+  s.concat(rule_provider_lines) if rp
+  s << 'proxies:'
   list.each { |p| s.concat(proxy_block(p, stats[p['name']] || { 'rounds' => 0, 'ok' => 0, 'median' => nil },
                                        carry ? carry[p['name']] : false)) }
   # 这两个组必须带 url/interval，否则关掉流水线测速后没有任何东西在国内线上挑节点。
@@ -856,12 +894,24 @@ def build_yaml(list, stats, note, carry = nil)
   s << '    type: select'
   s << '    proxies:'
   s << '      - DIRECT'
+  if rp
+    # 成员只放分组引用，不复制 300 个节点名：抄一份就多 60 KB，
+    # 而且内核会把同一批节点重复测一遍，选路质量不变、路由器更累。
+    # 这个组的用处是「哪天找到一个能过 ChatGPT 的节点，就手动钉在这里」，不影响其他流量。
+    s << '  - name: 🤖 AI 专用'
+    s << '    type: select'
+    s << '    proxies:'
+    ['♻️ 自动选择', '🚑 故障转移', '🎯 全局直连', 'DIRECT'].each { |n| s << "      - #{q(n)}" }
+  end
   s << '  - name: 🐟 漏网之鱼'
   s << '    type: select'
   s << '    proxies:'
   ['♻️ 自动选择', '🚀 节点选择', 'DIRECT'].each { |n| s << "      - #{q(n)}" }
   s << 'rules:'
-  RULES.each { |r| s << "  - #{r}" }
+  # RULE-SET 排在 GEOSITE 前面：同一批域名两条都能命中，先命中的生效，
+  # 让带 IP 段的 provider 有机会把「不走域名、直接连 IP」的那部分也接住。
+  rp_rules = rp ? RULE_PROVIDERS.map { |k, _n, tgt| "RULE-SET,#{k},#{tgt}" } : []
+  (rp_rules + RULES).each { |r| s << "  - #{r}" }
   # psych 对非 BMP 字符（旗标 emoji）会输出 \U 转义，各 Ruby 版本行为不一致；统一还原成字面量
   s.join("\n").gsub(/(?<!\\)\\U([0-9A-Fa-f]{8})/) { [$1.to_i(16)].pack('U') } + "\n"
 end
@@ -1166,7 +1216,7 @@ begin
     log "发布集 = 本轮 #{alive.size} + 上轮带过 #{carry_nodes.size} = #{emit_list.size}"
   end
   note += "｜ruby #{RUBY_VERSION}"
-  yaml_text = build_yaml(emit_list, stats, note, carry)
+  yaml_text = build_yaml(emit_list, stats, note, carry, outc['rule_providers'] != false)
   min_alive = outc['min_alive'].to_i
   outpath = File.join(work, outc['path'])
   if emit_list.size < min_alive && File.exist?(outpath)

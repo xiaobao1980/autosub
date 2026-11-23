@@ -79,6 +79,18 @@ jobs:
             n=$(ruby -ryaml -e 'print YAML.safe_load(File.read("work/autosub.yaml"))["proxies"].size')
             echo "内核自检通过：${n} 个节点可加载" >> "$GITHUB_STEP_SUMMARY"
           fi
+          # rule-providers 是内核运行时自己拉的，-t 不会去下载，所以这里单独确认两条 URL 还在、
+          # 还是 payload 格式。上游挪走文件的表现是内核日志里一句
+          # "initial rule provider xxx error"，规则静默失效，比配置报错难发现得多。
+          # 拉不到只警告不拦发布：那条规则不匹配而已，流量落到后面的规则，配置照样能用。
+          for f in OpenAI Telegram; do
+            u="https://fastly.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/${f}/${f}.yaml"
+            if curl -fsSL --max-time 20 "$u" | grep -q '^payload:'; then
+              echo "规则集 ${f} 可达" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "!! 规则集 ${f} 拉不到或格式变了：${u}" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
           exit "$rc"
 
       - name: 提交到 sub 分支

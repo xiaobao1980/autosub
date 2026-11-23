@@ -101,6 +101,10 @@ output:
   # 质量信号，也比订阅原序稳。300 个够 OpenClash 的 url-test 在国内挑出几十个好用的，
   # 再多只是让路由器每轮实测更累。填 0 表示不限。
   max_nodes: 300
+  # 产出的配置里要不要 rule-providers（Telegram/OpenAI 两条带 IP 段的规则集，运行时由内核
+  # 自己从 jsDelivr 拉）和 🤖 AI 专用 组。填 false 就退回纯 GEOSITE/GEOIP 规则，
+  # 完全不依赖外部规则文件——路由器断网、或你自己在 OpenClash 里另有规则来源时用。
+  rule_providers: true
 
 push:
   # GitHub Actions 路线用 none：产出交给 workflow 里的 git commit 步骤推，不需要 PAT。
