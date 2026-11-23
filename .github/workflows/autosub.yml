@@ -1,0 +1,74 @@
+name: autosub
+
+# 每 6 小时跑一次：抓四家免费订阅源 -> 去重 -> 出 OpenClash 能直接用的 yaml -> 提交到 sub 分支。
+# 注意 GitHub 的规矩：仓库 60 天没有任何活动（没人 commit、没人手动触发）会自动停用 schedule，
+# 日志里给一条 "Workflows have been disabled" 提醒；重新 push 代码或手动跑一次就恢复。
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+  # 改完代码或配置立刻验证一次，不用等下一个整点。
+  # 只列这两份文件：产出提交在 sub 分支且不含它们，所以不会自己触发自己。
+  push:
+    paths:
+      - autosub.rb
+      - sources.yaml
+      - .github/workflows/autosub.yml
+
+permissions:
+  contents: write
+
+# 上一轮没跑完时排队而不是取消：测速虽然关了，抓取仍要十几秒，取消会留下半个 commit。
+concurrency:
+  group: autosub
+  cancel-in-progress: false
+
+jobs:
+  autosub:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # 脚本只用 stdlib（net/http + yaml + json + base64），没有任何 gem 依赖，
+      # runner 镜像自带的 Ruby 就够。不装 setup-ruby 是为了少一个第三方 action 和一层
+      # Actions 权限设置（新建仓库可能被组织策略限制第三方 action）。
+      - name: 生成订阅
+        id: gen
+        run: |
+          set +e
+          ruby -v
+          ruby autosub.rb -c sources.yaml --stage all
+          rc=$?
+          if [ "$rc" -eq 2 ]; then
+            # 存活数低于 output.min_alive：脚本自己保住了上一版，本轮不提交就是「保留上一版」的含义。
+            echo "上一版没被覆盖（低于 min_alive），本轮不提交" >> "$GITHUB_STEP_SUMMARY"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
+
+      - name: 提交到 sub 分支
+        if: steps.gen.outputs.skip != 'true'
+        run: |
+          set -e
+          [ -s work/autosub.yaml ] || { echo "work/autosub.yaml 不存在或为空，不提交"; exit 1; }
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          # 每次都是孤儿分支 + force push：sub 分支永远只有 1 个 commit，tree 里只有产出两个文件。
+          # 为什么不 accumulate：订阅 yaml 是整文件重写，git 对这种 delta 压不动，
+          # 一天 4 次 × 几百 KB，两个月就几十 MB 且永久留在仓库历史里。
+          # force push 后旧 commit 变不可达对象，gc 完仓库体积不涨。
+          # 代价：sub 分支没有历史，要回溯去 Actions 的 run 记录看。
+          git checkout --orphan sub-tmp
+          git rm -r --cached -q .
+          cp work/autosub.yaml autosub.yaml
+          cp work/latest.json latest.json
+          git add autosub.yaml latest.json
+          n=$(ruby -rjson -e 'print JSON.parse(File.read("latest.json"))["alive"]')
+          git commit -q -m "订阅更新 $(date -u '+%Y-%m-%d %H:%M') UTC（${n} 个节点）"
+          git push -f origin HEAD:sub
+
+          u="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/sub/autosub.yaml"
+          echo "订阅地址：${u}" >> "$GITHUB_STEP_SUMMARY"

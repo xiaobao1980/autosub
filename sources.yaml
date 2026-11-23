@@ -1,0 +1,119 @@
+# 自动订阅流水线配置（GitHub Actions 版）
+# 跑法：Actions 每 6h 自动跑一次（.github/workflows/autosub.yml），也可在 Actions 页手动触发。
+# 本地验证：ruby autosub.rb -c sources.yaml --stage all
+
+# work_dir 留空即用默认值 <本文件所在目录>/work——Actions runner 是普通用户，写不进 /root，
+# 所以不能再填绝对路径。想换地方用环境变量 AUTOSUB_WORK_DIR 覆盖，不改本文件。
+# work_dir: work
+
+# 输入：吃上游已聚合的免费节点池。多源并集 + 去重，单家 404 或被删时其余源兜底。
+upstreams:
+  # 主力：dongchengjie/airport 每 6h 聚合 90+ 源、剔过一轮海外视角死节点，1614 个上下
+  - name: airport-tested
+    url: https://raw.githubusercontent.com/dongchengjie/airport/main/subs/merged/tested_within.yaml
+    mirrors:
+      - https://fastly.jsdelivr.net/gh/dongchengjie/airport@main/subs/merged/tested_within.yaml
+  # 叠加三家今天仍在 push 的采集仓，扩大池子也分摊单源消失的风险
+  - name: freenode
+    url: https://raw.githubusercontent.com/ripaojiedian/freenode/main/clash
+    mirrors:
+      - https://fastly.jsdelivr.net/gh/ripaojiedian/freenode@main/clash
+  - name: free-servers
+    url: https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub
+    mirrors:
+      - https://fastly.jsdelivr.net/gh/Pawdroid/Free-servers@main/sub
+  - name: v2rayfree
+    url: https://raw.githubusercontent.com/free-nodes/v2rayfree/main/README.md
+    mirrors:
+      - https://fastly.jsdelivr.net/gh/free-nodes/v2rayfree@main/README.md
+  # 加付费机场必须写 private: true —— 推送前会校验目标仓库可见性，公开仓库直接中止。
+  # 地址里带 target=/token=/sub/<长串> 这类凭据特征又没写 private 的，脚本拒绝启动。
+  # - name: mypanel
+  #   url: https://example.com/sub?target=xxxx
+  #   private: true
+
+# GitHub Actions 路线不测速（runner 是海外机房视角，测出来的存活对国内家宽无意义），
+# 所以协议白名单放到 mihomo 全支持集，交给 OpenClash 侧的 url-test 在国内实测挑活的。
+# 保留白名单是为了剔掉订阅链接里根本进不了 yaml 的怪类型，以及明显是占位的裸 http。
+type_allowlist: [wireguard, http, https, vless, vmess, trojan, ss, ssr, hysteria, hysteria2, tuic, socks5, snell]
+
+fetch:
+  cache_ttl: 300
+  retries: 3
+  # auto = 先按系统默认协商，握手被掐（unexpected eof）就自动降到 TLS1.2 并钉住。
+  # 本机 OpenSSL 3.0.22 实测 TLS1.3 过不去、TLS1.2 正常，所以 auto 就能工作。
+  # 想省掉第一次失败填 "1.2"；填别的值直接报错。
+  tls_max_version: auto
+
+healthcheck:
+  # GitHub Actions 路线关掉：runner 在海外机房，GFW 的阻断是方向性的，它连得通不代表你家宽连得上。
+  # 在国内线上实测这活交给产出 yaml 里的 url-test/fallback 组（mihomo 自己按 interval 跑）。
+  # 想在路由器上恢复我们那套国内视角测速，把本行改回 true，并把 max_candidates 调回 1100。
+  enabled: false
+  # 本机实测：/proc/<主实例>/exe -> /etc/openclash/core/clash_meta（OpenClash 不叫 mihomo，
+  # 所以 find -name 'mihomo*' 搜不到）。留 null 也能自动探到，这里显式写死更省事。
+  mihomo_bin: /etc/openclash/core/clash_meta
+  # 只跑 1 轮、只用 Cloudflare。两条实测依据：
+  # 一是 gstatic 那轮的独有贡献只有 3 个和 6 个（两轮实测 32/16、36/21），而它们进复查还得
+  # 过 Cloudflare 这一关，等于白花 5 分钟；二是粗筛和复查之间隔了 5~11 分钟，自由节点池
+  # 在这段里已经换过状态，多一轮只是把时间差里的抖动记成节点死亡。
+  rounds: 1                 # 粗筛轮数，跨靶跨轮取并集（任一轮连上就算候选），管召回
+  confirm_rounds: 2         # 候选再用长超时复查，只用第一个靶、跨轮取交集（每轮都要连上），管精度
+  timeout_ms: 4000
+  # 8000 -> 12000 实测是反的：单轮连通从 ~0.7 掉到 15/40、17/40，504 一个没转成延迟。
+  # 说明这些 504 是连接挂死而不是排队等不到，放宽超时救不回来，反而让每轮多占 4s 连接。
+  # 淘汰原因看日志「复查淘汰」那行：503 多是该砍，504 多曾怀疑超时，现已排除。
+  confirm_timeout_ms: 8000
+  concurrency: 8            # 路由器 CPU 弱，别超过 8
+  # 上限必须大于白名单内的实际数量（1056），否则每轮只测同一批：粘性排序之外的节点
+  # 按名字排，不轮换，被截断的那部分永远测不到。留 1100 是全量覆盖。
+  max_candidates: 1100      # 单次测速上限，控制总耗时
+  # 靶子列表。第 i 轮粗筛用第 i 个靶，粗筛取并集（连上任一个就算候选）；复查只用第一个靶，
+  # 跨轮取交集（每轮都要连上，抖动的在这里筛掉）。
+  # 为什么不能只留 gstatic：mihomo 是本地解析靶子域名 -> 拿 IP -> 让远端节点去连那个 IP。
+  # 223.5.5.5 解 www.gstatic.com 得 120.253.253.226（Google 北京机房），境外节点连它必超时
+  # ——实测 883/1052 全报 Timeout，存活被压到 0.9%。cp.cloudflare.com 国内外解析答案一致
+  # （104.16.132.229 任播），谁都连得到，所以排第一位。gstatic 实测弱得多：1052 个里只过 16 个，
+  # 而且其中 13 个 Cloudflare 也过了，独有贡献 3 个。留着是因为它测的是另一批出口
+  # （能连 Google 北京机房的 CN/HK 节点），不是当主力尺子；别把它挪到第一位，复查只认第一个靶，
+  # 挪上去等于用一把半数节点够不着的尺子做终局裁决。
+  test_url:
+    - http://cp.cloudflare.com/generate_204
+    - http://www.gstatic.com/generate_204
+  boot_wait: 20
+  # 临时实例自带解析器。路由器上 resolv.conf -> 127.0.0.1 的 dnsmasq，OpenClash 的 fake-ip
+  # 会把 www.gstatic.com 解成 198.18.0.127；内核把这个假地址交给远端节点去连，
+  # 1052 个节点不管死活全部超时（实测存活 0/1052）。223.5.5.5 直连能拿到真 IP。
+  # 填 false 退回跟随系统解析；若 OpenClash 连出站 53 也劫持，日志的「失败样本」会现出
+  # 198.18.x 的靶地址，那时换 test_url 才是正解。
+  nameserver: 223.5.5.5
+
+output:
+  path: autosub.yaml
+  stats: stats.csv
+  # 名单文件存的是「本轮实测通过」而不是「本轮发布」，下一轮把两者取并集再发布。
+  # 存发布集会成单向棘轮：节点一旦靠并集进来，之后每轮都有「上轮也发过」替它说话，只进不出。
+  # 存实测集则一个节点最多被带一次——本轮没过就不进本轮实测，下轮没有替它说话的了，自动掉出。
+  alive_list: previous_alive.txt
+  manifest: latest.json
+  min_alive: 5              # 少于这个数不覆盖上一版（上游流水线没有这层保护）。判据是并集后的发布数
+  # 不测速时按「同一节点出现在多少个独立订阅源里」降序截断。共现次数是唯一不需要测速就有据的
+  # 质量信号，也比订阅原序稳。300 个够 OpenClash 的 url-test 在国内挑出几十个好用的，
+  # 再多只是让路由器每轮实测更累。填 0 表示不限。
+  max_nodes: 300
+
+push:
+  # GitHub Actions 路线用 none：产出交给 workflow 里的 git commit 步骤推，不需要 PAT。
+  # 在路由器上手动跑并直推仓库时才改回 api（那才需要 .env 里的 token）。
+  method: none
+  repo: xiaobao1980/autosub  # 已建好；改成 owner/name 即可换仓库
+  branch: main
+  token_env: GITHUB_TOKEN   # 建议只在 run.sh 里 export，不要写进本文件
+  token_file: null          # 或者填 /root/autosub/.gh_token 并 chmod 600
+  files:
+    - local: autosub.yaml
+      remote: sub/autosub.yaml
+    - local: stats.csv
+      remote: sub/stats.csv
+    - local: latest.json
+      remote: sub/latest.json
