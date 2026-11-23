@@ -48,6 +48,39 @@ jobs:
             exit "$rc"
           fi
 
+      # 发之前用真内核验一遍。mihomo 解析代理是全有全无的：一个非法字段就让内核拒绝加载整份配置，
+      # 在 OpenClash 里的表现是「下载成功、配置文件测试失败」，等于这份订阅不存在——比节点少更糟。
+      # 实测踩过的两类：sniff 写成老 Clash 的列表（内核要 协议->{ports} 的 map）、
+      # 2022-blake3-* 的口令不是定长 base64。前者已在代码里改对，后者由 drop_broken! 剔掉。
+      # 自检失败就不提交，保住上一版能用的文件；拿不到内核二进制时重试几次后放行，
+      # 不能因为 GitHub release 抽风把订阅冻住。
+      - name: 内核自检
+        if: steps.gen.outputs.skip != 'true'
+        run: |
+          set +e
+          V=v1.19.34
+          for i in 1 2 3; do
+            curl -fsSL -o /tmp/m.gz "https://github.com/MetaCubeX/mihomo/releases/download/${V}/mihomo-linux-amd64-${V}.gz" && break
+            sleep 5
+          done
+          gunzip -c /tmp/m.gz > /tmp/mihomo && chmod +x /tmp/mihomo
+          if [ ! -s /tmp/mihomo ]; then
+            echo "拿不到 mihomo，本轮跳过内核自检" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          mkdir -p /tmp/mrun
+          cp work/autosub.yaml /tmp/mrun/config.yaml
+          /tmp/mihomo -t -d /tmp/mrun > /tmp/mrun/log.txt 2>&1
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "内核拒绝加载这份配置，本轮不提交（sub 分支保住上一版）：" >> "$GITHUB_STEP_SUMMARY"
+            grep -o 'level=error msg="[^"]*"' /tmp/mrun/log.txt | head -5 >> "$GITHUB_STEP_SUMMARY"
+          else
+            n=$(ruby -ryaml -e 'print YAML.safe_load(File.read("work/autosub.yaml"))["proxies"].size')
+            echo "内核自检通过：${n} 个节点可加载" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$rc"
+
       - name: 提交到 sub 分支
         if: steps.gen.outputs.skip != 'true'
         run: |

@@ -457,6 +457,32 @@ def sanitize!(list)
   n
 end
 
+# 有一类节点的问题是「让内核整份拒绝」而不是「连不上」：mihomo 解析代理是全有全无的，
+# 一个非法字段就让它拒绝加载整份配置——OpenClash 的表现是「配置文件下载成功、测试失败」，
+# 一个节点都出不来。实测 v1.19.34 报：
+#   proxy 19: ss 27.124.5.86:8388 cipher: 2022-blake3-aes-256-gcm
+#   initialize error: decode key: illegal base64 data at input byte 43
+# 2022-blake3 系列的 password 不是任意口令，是定长 base64 密钥：aes-128 解出来必须 16 字节、
+# aes-256 必须 32 字节。坏的就是口令本身，改字段救不回来，只能删。
+def drop_broken!(list)
+  dropped = []
+  list.reject! do |p|
+    next false unless p['type'].to_s == 'ss'
+    m = p['cipher'].to_s.match(/2022-blake3-aes-(128|256)-gcm/)
+    next false unless m
+    want = m[1] == '128' ? 16 : 32
+    raw = begin
+      Base64.strict_decode64(p['password'].to_s)
+    rescue ArgumentError
+      nil
+    end
+    next false if raw && raw.bytesize == want
+    dropped << "#{p['name']}（#{p['cipher']} 的口令不是 #{want} 字节的 base64）"
+    true
+  end
+  dropped
+end
+
 # 内核点名拒绝某个节点时返回 [0 基下标, 原因]。实测 msg 里的编号是 0 基。
 def core_reject(logfile)
   return nil unless File.exist?(logfile)
@@ -789,8 +815,15 @@ def build_yaml(list, stats, note, carry = nil)
        '  default-nameserver:', '    - 223.5.5.5',
        '    - 119.29.29.29', '  nameserver:', '    - https://doh.pub/dns-query',
        '    - https://dns.alidns.com/dns-query',
+       # sniff 在 mihomo 是「协议 -> {ports: [...]}」的 map；老 Clash 那种 `- ".+"` 列表写法
+       # 内核直接拒绝：yaml: cannot unmarshal !!seq into map[string]config.RawSniffingConfig。
+       # OpenClash 添加订阅时的「配置文件测试」就是死在这一行，报「测试失败，请查看内核日志」。
        'sniffer:', '  enable: true', '  override-destination: true',
-       '  sniff:', '    - ".+"', '  force-domain:', '    - "+.google.com"', '    - "+.netflix.com"',
+       '  sniff:',
+       '    HTTP:', '      ports: [80, 8080-8888]',
+       '    TLS:', '      ports: [443, 8443]',
+       '    QUIC:', '      ports: [443, 8443]',
+       '  force-domain:', '    - "+.google.com"', '    - "+.netflix.com"',
        'proxies:']
   list.each { |p| s.concat(proxy_block(p, stats[p['name']] || { 'rounds' => 0, 'ok' => 0, 'median' => nil },
                                        carry ? carry[p['name']] : false)) }
@@ -1062,6 +1095,8 @@ begin
   # 置空而不是丢弃：不炸解析，也不少候选，能不能用交给测速裁决。
   fixed = sanitize!(list)
   log "修复非法 REALITY 字段 #{fixed} 个" if fixed > 0
+  broken = drop_broken!(list)
+  log "删掉会让内核整份拒绝的节点 #{broken.size} 个：#{broken.first(3).join('；')}" unless broken.empty?
 
   # 3 粘性排序：上次活着的优先，其次多源共现的优先
   alive_file = File.join(work, outc['alive_list'])
