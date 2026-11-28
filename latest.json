@@ -1,0 +1,65 @@
+{
+  "generated_at": "2026-11-28T14:43:13+00:00",
+  "sources": [
+    {
+      "name": "airport-tested",
+      "nodes": 1614,
+      "note": "跳过不可识别 0"
+    },
+    {
+      "name": "freenode",
+      "nodes": 19,
+      "note": "跳过不可识别 0"
+    },
+    {
+      "name": "free-servers",
+      "nodes": 10,
+      "note": "跳过不可识别 0"
+    },
+    {
+      "name": "v2rayfree",
+      "nodes": 20,
+      "note": "跳过不可识别 0"
+    }
+  ],
+  "candidates": 1644,
+  "alive": 300,
+  "alive_this_run": 0,
+  "carried": 0,
+  "alive_ratio": 18.25,
+  "best_median_ms": null,
+  "types": [
+    {
+      "type": "ss",
+      "n": 30
+    },
+    {
+      "type": "vless",
+      "n": 194
+    },
+    {
+      "type": "hysteria2",
+      "n": 8
+    },
+    {
+      "type": "trojan",
+      "n": 47
+    },
+    {
+      "type": "vmess",
+      "n": 5
+    },
+    {
+      "type": "http",
+      "n": 3
+    },
+    {
+      "type": "wireguard",
+      "n": 12
+    },
+    {
+      "type": "socks5",
+      "n": 1
+    }
+  ]
+}
